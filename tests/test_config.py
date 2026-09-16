@@ -41,3 +41,31 @@ def test_rejects_duplicate_keys(tmp_path):
     with pytest.raises(ConfigError, match="Duplicate"):
         load_config(path)
 
+
+@pytest.mark.parametrize("spec", [
+    {"enabled": "yes"}, {"enabled": False, "idle_seconds": 0},
+    {"enabled": False, "frame_seconds": float("nan")},
+    {"images": "missing"}, {"enabled": True},
+])
+def test_invalid_screensaver_config(tmp_path, spec):
+    with pytest.raises(ConfigError):
+        load_config(write(tmp_path, {"screensaver": spec}))
+
+
+def test_disabled_screensaver_needs_no_assets(tmp_path):
+    config = load_config(write(tmp_path, {"screensaver": {"enabled": False}}))
+    assert config.screensaver is None
+
+
+def test_screensaver_loads_images_relative_to_json(tmp_path):
+    from PIL import Image
+    faces = tmp_path / "faces"
+    faces.mkdir()
+    for i in range(6):
+        Image.new("RGB", (60, 60)).save(faces / f"{i}.png")
+    config = load_config(write(tmp_path, {"screensaver": {"images": "faces"}}))
+    assert len(config.screensaver.images) == 6
+    assert config.screensaver.idle_seconds == 10
+    (faces / "0.png").write_bytes(b"invalid image")
+    with pytest.raises(ConfigError, match="Invalid screensaver image"):
+        load_config(tmp_path / "config.json")

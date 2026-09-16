@@ -28,11 +28,19 @@ class Button:
 
 
 @dataclass(frozen=True)
+class ScreensaverConfig:
+    images: tuple[Path, ...]
+    idle_seconds: float = 10
+    frame_seconds: float = 60
+
+
+@dataclass(frozen=True)
 class Config:
     brightness: int
     main_knob: int
     volume_steps: int
     buttons: dict[int, Button]
+    screensaver: ScreensaverConfig | None = None
 
 
 def _object(value, name, allowed):
@@ -75,7 +83,7 @@ def load_config(path: Path) -> Config:
         raw = json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=_unique)
     except (OSError, ValueError) as exc:
         raise ConfigError(f"Cannot read {path}: {exc}") from exc
-    raw = _object(raw, "config", {"brightness", "main_knob", "volume_steps", "buttons"})
+    raw = _object(raw, "config", {"brightness", "main_knob", "volume_steps", "buttons", "screensaver"})
     brightness = _integer(raw.get("brightness", 70), "brightness", 0, 100)
     knob = _integer(raw.get("main_knob", 0), "main_knob", 0, 2)
     steps = _integer(raw.get("volume_steps", 1), "volume_steps", 1, 10)
@@ -126,5 +134,33 @@ def load_config(path: Path) -> Config:
                 raise ConfigError("app.timeout must be a number greater than 0 and at most 120")
             app = App(tuple(args), process, title, cwd, timeout)
         buttons[int(key)] = Button(label, icon, app)
-    return Config(brightness, knob, steps, buttons)
-
+    screensaver = None
+    if "screensaver" in raw:
+        spec = _object(raw["screensaver"], "screensaver",
+                       {"enabled", "images", "idle_seconds", "frame_seconds"})
+        enabled = spec.get("enabled", True)
+        if type(enabled) is not bool:
+            raise ConfigError("screensaver.enabled must be true or false")
+        intervals = {}
+        for name, default, minimum in (("idle_seconds", 10, 1), ("frame_seconds", 60, 0.5)):
+            value = spec.get(name, default)
+            if type(value) not in (int, float) or not math.isfinite(value) or not minimum <= value <= 3600:
+                raise ConfigError(f"screensaver.{name} must be a number from {minimum} to 3600")
+            intervals[name] = value
+        if enabled:
+            directory = _path(_text(spec.get("images"), "screensaver.images"), base)
+            if not directory.is_dir():
+                raise ConfigError(f"Screensaver image directory does not exist: {directory}")
+            images = tuple(sorted(p for p in directory.iterdir()
+                                  if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}))
+            if len(images) < 6:
+                raise ConfigError("Screensaver needs at least six images")
+            from PIL import Image
+            for image_path in images:
+                try:
+                    with Image.open(image_path) as image:
+                        image.verify()
+                except (OSError, ValueError) as exc:
+                    raise ConfigError(f"Invalid screensaver image {image_path}: {exc}") from exc
+            screensaver = ScreensaverConfig(images, **intervals)
+    return Config(brightness, knob, steps, buttons, screensaver)

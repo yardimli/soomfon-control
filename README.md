@@ -50,7 +50,7 @@ The example starts with Notepad and File Explorer, plus four unassigned display 
 }
 ```
 
-Use your actual installation path. `icon` and `app` are optional; without an app the button has no action. The icon replaces the text label on the display. Images are fitted inside 60×60 pixels without stretching; transparent pixels use a dark background. Omit `icon` to use a short text label. Unconfigured displays are cleared at startup.
+Use your actual installation path. `icon` and `app` are optional; without an app the button has no action. The icon replaces the text label on the display. App icons are fitted inside 58×58 pixels without stretching, centered on the 60×60 display with a one-pixel background border on every side; transparent pixels use a dark background. Omit `icon` to use a short text label. Unconfigured displays are cleared at startup.
 
 | Field | Meaning |
 | --- | --- |
@@ -76,6 +76,25 @@ Button IDs are upstream's zero-based IDs: LCD buttons **0–5**, plain buttons *
 
 This prints events without launching apps, changing volume, or replacing icons. Turn the large knob and put the printed encoder number in `main_knob`. Ctrl+C exits. On this CN002, live input confirmed that the large knob is encoder **1** and its press is key **10**; the supplied configuration uses `main_knob: 1`.
 
+## Faces screensaver
+
+The supplied configuration starts a screensaver after **10 seconds without controller input** (PC mouse/keyboard activity does not affect this timer). It shows photorealistic human faces from a collection of 64 expressions. Each button gets a random **30–90 second** timer with the default `frame_seconds: 60`. Whenever one face changes, a shared **10-second cooldown** starts and every other button's deadline is pushed another 10 seconds later (overdue timers restart from now). Only one face changes at a time, with at least 10 seconds between changes after the initial display. These extra delays can reduce the overall rate below six changes per minute. Each change fades the old face to black and then fades in the new face over about one second (12 small image uploads). Fade frames do not extend the cooldown. Waking the display cancels the transition and restores the icons. With the supplied face collection, each new face differs from the faces currently displayed on all six buttons.
+
+```json
+"screensaver": {
+  "enabled": true,
+  "idle_seconds": 10,
+  "frame_seconds": 60,
+  "images": "assets/faces"
+}
+```
+
+The first button or knob press wakes the display and restores all app icons **without triggering that press's action**. Press again to launch/focus an app or play/pause. Turning a knob also wakes the display; the volume knob still changes volume on that turn. Unassigned controls also reset the timer. Screensaver start/stop messages and all input events appear in the console. Ctrl+C stops the animation and displays the cartoon “STOP / I'M / OFFLINE” panorama across the six buttons before closing. The device retains that picture while the controller is stopped; restarting restores the app icons. This applies to a normal Python shutdown, not an abrupt process kill or power loss.
+
+Set `enabled` to `false` to disable the screensaver. `images` is a directory relative to the JSON file and must contain at least six valid PNG/JPEG/WebP files. Restart after changing the configuration. Display updates use their own worker so USB image uploads do not block input callbacks.
+
+The artwork was generated with the built-in imagegen tool as one **8×8 sprite sheet**, then cropped into **64 separate 60×60 PNGs** using `tools/crop_faces.py`. The source is `assets/faces-sheet.png`; generation details and the prompt are in `assets/faces-artwork.md`. To re-crop a replacement sheet, run `.\.venv\Scripts\python tools\crop_faces.py`.
+
 ## Finding the right app window
 
 Open the target program, then run:
@@ -98,3 +117,13 @@ Launches run on a worker so volume and play/pause remain responsive while a prog
 ```
 
 Tests cover configuration errors, path handling, icon fitting, event routing, pending launch suppression, and focus-or-launch behavior with mocked desktop actions. They do not press media keys, launch programs, or require a connected device. Real hardware icon orientation, knob numbering, and desktop focus behavior should be checked on your device with your configured apps.
+
+### Fade overhead
+
+Only the changing button receives animation frames. Using all 64 supplied faces, a local benchmark measured roughly 49 KB of HID reports and 1.2 ms of CPU for blending, JPEG encoding and packet framing per transition. At six transitions per minute this is about 4.8 KiB/s average report traffic. These measurements exclude actual USB I/O, USB bus framing and OS scheduling; physical smoothness depends on the device. The display worker sends frames incrementally, so wake input can cancel a fade immediately instead of waiting for the whole animation.
+
+Run `.\.venv\Scripts\python tools\benchmark_fade.py` to repeat the estimate without opening or writing to the device.
+
+### Offline shutdown screen
+
+The packaged `src/soomfon_control/assets/offline.png` is a single **180x120** cartoon panorama (about 33 KB), cut at runtime into six equal 60x60 tiles in button order 0–5 (three columns, two rows). It appears on normal controller shutdown, whether or not the screensaver was active. Artwork generation details are in `assets/offline-artwork.md`.
