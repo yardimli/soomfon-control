@@ -1,0 +1,25 @@
+{
+  "brightness": 70,
+  "main_knob": 1,
+  "volume_steps": 1,
+  "buttons": {
+    "0": {
+      "label": "Notepad",
+      "app": {
+        "command": ["notepad.exe"],
+        "process": "notepad.exe"
+      }
+    },
+    "1": {
+      "label": "Files",
+      "app": {
+        "command": ["explorer.exe"],
+        "process": "explorer.exe"
+      }
+    },
+    "2": {"label": "Button 3"},
+    "3": {"label": "Button 4"},
+    "4": {"label": "Button 5"},
+    "5": {"label": "Button 6"}
+  }
+}
