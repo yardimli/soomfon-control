@@ -1,31 +1,52 @@
 {
   "brightness": 70,
+  "brightness_knob": 0,
+  "brightness_step": 5,
   "main_knob": 1,
   "volume_steps": 1,
   "screensaver": {
     "enabled": true,
-    "idle_seconds": 10,
+    "idle_seconds": 60,
     "frame_seconds": 60,
-    "images": "assets/faces"
+    "images": "assets/faces",
+    "mode": "cards",
+    "local_timezone": "local",
+    "weather": {
+      "city": "Xindian",
+      "country": "Taiwan",
+      "region": "New Taipei City"
+    }
   },
   "buttons": {
     "0": {
       "label": "Notepad",
       "app": {
-        "command": ["notepad.exe"],
+        "command": [
+          "notepad.exe"
+        ],
         "process": "notepad.exe"
       }
     },
     "1": {
       "label": "Files",
       "app": {
-        "command": ["explorer.exe"],
+        "command": [
+          "explorer.exe"
+        ],
         "process": "explorer.exe"
       }
     },
-    "2": {"label": "Button 3"},
-    "3": {"label": "Button 4"},
-    "4": {"label": "Button 5"},
-    "5": {"label": "Button 6"}
+    "2": {
+      "label": "Button 3"
+    },
+    "3": {
+      "label": "Button 4"
+    },
+    "4": {
+      "label": "Button 5"
+    },
+    "5": {
+      "label": "Button 6"
+    }
   }
 }

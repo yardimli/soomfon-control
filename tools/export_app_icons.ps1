@@ -1,5 +1,7 @@
 param(
-    [string]$Config = (Join-Path $PSScriptRoot '..\config.json')
+    [string]$Config = (Join-Path $PSScriptRoot '..\config.json'),
+    [int[]]$Buttons = @(0, 1, 2, 3, 4, 5),
+    [int]$Page = 6
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,9 +26,18 @@ $settings = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $iconDirectory = Join-Path $base 'icons'
 New-Item -ItemType Directory -Path $iconDirectory -Force | Out-Null
 
-foreach ($property in $settings.buttons.PSObject.Properties) {
+$buttonSettings = $settings.buttons
+if ($settings.pages) {
+    $selectedPage = $settings.pages.PSObject.Properties | Where-Object Name -eq "$Page"
+    if (-not $selectedPage) { throw "Page selector $Page not found" }
+    $buttonSettings = $selectedPage.Value.buttons
+}
+foreach ($property in $buttonSettings.PSObject.Properties) {
     $key = [int]$property.Name
+    if ($key -notin $Buttons) { continue }
     $button = $property.Value
+    $package = $null
+    $entry = $null
     if ($key -gt 5 -or -not $button.app) { continue }
     $executable = [Environment]::ExpandEnvironmentVariables($button.app.command[0])
     $appFolderArgument = $button.app.command | Where-Object { $_ -like 'shell:AppsFolder\*' } | Select-Object -First 1
@@ -53,10 +64,20 @@ foreach ($property in $settings.buttons.PSObject.Properties) {
     $bitmap = $null
     try {
         $result = [SoomfonIconExport]::Extract($executable, 0, 0, [ref]$large, [ref]$small, 64)
-        if ($result -ne 0 -or $large -eq [IntPtr]::Zero) { throw "Cannot extract icon from $executable (HRESULT $result)" }
-        $icon = [Drawing.Icon]::FromHandle($large)
-        $bitmap = $icon.ToBitmap()
+        if ($result -ne 0 -or $large -eq [IntPtr]::Zero) {
+            if (-not $package) { throw "Cannot extract icon from $executable (HRESULT $result)" }
+            $logo = Join-Path $package.InstallLocation $entry.VisualElements.Square44x44Logo
+            $logoBase = Join-Path (Split-Path -Parent $logo) ([IO.Path]::GetFileNameWithoutExtension($logo))
+            $logoCandidates = @("${logoBase}.targetsize-256_altform-unplated.png", "${logoBase}.targetsize-256.png", "${logoBase}.scale-200.png", $logo)
+            $logoFile = $logoCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            if (-not $logoFile) { throw "No packaged logo found for $($button.label)" }
+            $bitmap = [Drawing.Bitmap]::new($logoFile)
+        } else {
+            $icon = [Drawing.Icon]::FromHandle($large)
+            $bitmap = $icon.ToBitmap()
+        }
         $relative = "icons/button-$key.png"
+        if ($settings.pages) { $relative = "icons/page-$Page-button-$key.png" }
         $bitmap.Save((Join-Path $base $relative), [Drawing.Imaging.ImageFormat]::Png)
         $button | Add-Member -NotePropertyName icon -NotePropertyValue $relative -Force
         Write-Output "Exported $($button.label) -> $relative"

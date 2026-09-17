@@ -24,7 +24,14 @@ def _driver():
     except ImportError as exc:
         raise RuntimeError("Cannot load SOOMFON/HIDAPI. Install this project and run "
                            "python tools/install_hidapi.py; see README.md.") from exc
-    return Soomfon
+    class ControllerDevice(Soomfon):
+        def set_brightness(self, pct):
+            # Upstream image transfers hold this lock, but brightness writes do not.
+            # Prevent a brightness command from interrupting a screensaver JPEG transfer.
+            with self._lock:
+                super().set_brightness(pct)
+
+    return ControllerDevice
 
 
 def main(argv=None):
@@ -39,7 +46,8 @@ def main(argv=None):
     try:
         if args.check:
             config = load_config(args.config)
-            print(f"Configuration OK: {len(config.buttons)} buttons; main knob {config.main_knob}")
+            count = sum(len(page.buttons) for page in config.pages.values()) if config.pages else len(config.buttons)
+            print(f"Configuration OK: {len(config.pages) or 1} page(s), {count} buttons; main knob {config.main_knob}")
             return 0
         if sys.platform != "win32":
             raise RuntimeError("Desktop actions currently support Windows only.")
@@ -73,4 +81,3 @@ def main(argv=None):
     except (ConfigError, RuntimeError, OSError, StopIteration) as exc:
         logging.error("%s", exc or "Device found but its expected HID interface is missing")
         return 1
-

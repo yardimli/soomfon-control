@@ -49,8 +49,17 @@ class Screensaver:
         self._restore = False
         self.active = False
         self._bag = []
+        self._weather = None
+        self._cards = None
+        if config.mode == "cards":
+            from .weather import WeatherService
+            from .cards import CardsRenderer
+            self._weather = WeatherService(config.weather)
+            self._cards = CardsRenderer(config.local_timezone, self._weather)
 
     def start(self):
+        if self._weather:
+            self._weather.start()
         self._last_activity = self.clock()
         self._thread = threading.Thread(target=self._run, name="screensaver", daemon=True)
         self._thread.start()
@@ -85,6 +94,17 @@ class Screensaver:
         self._current_faces[key] = selected
         return self.faces[selected]
 
+    def set_icons(self, icons):
+        """Switch pages, cancel any in-flight frame, and wake directly into the new page."""
+        with self._lock:
+            self.icons = icons
+            self.active = False
+            self._last_activity = self.clock()
+            self._restore = True
+            self._fade_frames = [deque() for _ in range(6)]
+            self._generation += 1
+        self._changed.set()
+
     def _delay(self):
         return random.uniform(self.config.frame_seconds * 0.5, self.config.frame_seconds * 1.5)
 
@@ -96,42 +116,46 @@ class Screensaver:
                 self._restore = False
                 frames = list(enumerate(self.icons))
             elif self.active or now - self._last_activity >= self.config.idle_seconds:
-                if not self.active:
+                entering = not self.active
+                if entering:
                     self.active = True
                     self._next_frame = [0.0] * 6
                     self._next_change = 0.0
                     self._current_faces = [None] * 6
                     self._fade_frames = [deque() for _ in range(6)]
                     log.info("Screensaver started after %ss idle", self.config.idle_seconds)
-                frames = []
-                due = [key for key in range(6)
-                       if self._current_faces[key] is not None
-                       and not self._fade_frames[key]
-                       and now >= self._next_frame[key]]
-                # Only the longest-waiting button may change after the shared cooldown.
-                change_key = (min(due, key=lambda key: self._next_frame[key])
-                              if due and now >= self._next_change else None)
-                for key in range(6):
-                    if self._fade_frames[key]:
-                        if now >= self._next_fade[key]:
-                            frames.append((key, self._fade_frames[key].popleft()))
-                            self._next_fade[key] = now + self._fade_seconds
-                    elif self._current_faces[key] is None or key == change_key:
-                        changing = self._current_faces[key] is not None
-                        old_face = self.faces[self._current_faces[key]] if changing else None
-                        new_face = self._next_face(key)
-                        if changing:
-                            self._fade_frames[key] = deque(fade_frames(old_face, new_face))
-                            frames.append((key, self._fade_frames[key].popleft()))
-                            self._next_fade[key] = now + self._fade_seconds
-                        else:
-                            frames.append((key, new_face))
-                        self._next_frame[key] = now + self._delay()
-                        if changing:
-                            self._next_change = now + 10
-                            for other in range(6):
-                                if other != key:
-                                    self._next_frame[other] = max(now, self._next_frame[other]) + 10
+                if self._cards:
+                    frames = self._cards.render(force=entering)
+                else:
+                    frames = []
+                    due = [key for key in range(6)
+                           if self._current_faces[key] is not None
+                           and not self._fade_frames[key]
+                           and now >= self._next_frame[key]]
+                    # Only the longest-waiting button may change after the shared cooldown.
+                    change_key = (min(due, key=lambda key: self._next_frame[key])
+                                  if due and now >= self._next_change else None)
+                    for key in range(6):
+                        if self._fade_frames[key]:
+                            if now >= self._next_fade[key]:
+                                frames.append((key, self._fade_frames[key].popleft()))
+                                self._next_fade[key] = now + self._fade_seconds
+                        elif self._current_faces[key] is None or key == change_key:
+                            changing = self._current_faces[key] is not None
+                            old_face = self.faces[self._current_faces[key]] if changing else None
+                            new_face = self._next_face(key)
+                            if changing:
+                                self._fade_frames[key] = deque(fade_frames(old_face, new_face))
+                                frames.append((key, self._fade_frames[key].popleft()))
+                                self._next_fade[key] = now + self._fade_seconds
+                            else:
+                                frames.append((key, new_face))
+                            self._next_frame[key] = now + self._delay()
+                            if changing:
+                                self._next_change = now + 10
+                                for other in range(6):
+                                    if other != key:
+                                        self._next_frame[other] = max(now, self._next_frame[other]) + 10
             else:
                 return
             generation = self._generation
@@ -162,6 +186,8 @@ class Screensaver:
     def close(self, *, restore_icons=True):
         self._stop.set()
         self._changed.set()
+        if self._weather:
+            self._weather.close()
         if self._thread:
             self._thread.join()
         # Leave app icons on the hardware when quitting, not a frozen screensaver.

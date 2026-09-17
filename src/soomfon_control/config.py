@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -28,10 +28,28 @@ class Button:
 
 
 @dataclass(frozen=True)
+class WeatherConfig:
+    city: str = "Xindian"
+    country: str = "Taiwan"
+    region: str = "New Taipei City"
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+@dataclass(frozen=True)
 class ScreensaverConfig:
     images: tuple[Path, ...]
     idle_seconds: float = 10
     frame_seconds: float = 60
+    mode: str = "faces"
+    local_timezone: str = "local"
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
+
+
+@dataclass(frozen=True)
+class Page:
+    name: str
+    buttons: dict[int, Button]
 
 
 @dataclass(frozen=True)
@@ -41,6 +59,9 @@ class Config:
     volume_steps: int
     buttons: dict[int, Button]
     screensaver: ScreensaverConfig | None = None
+    brightness_knob: int | None = None
+    brightness_step: int = 5
+    pages: dict[int, Page] = field(default_factory=dict)
 
 
 def _object(value, name, allowed):
@@ -78,20 +99,10 @@ def _unique(pairs):
     return result
 
 
-def load_config(path: Path) -> Config:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=_unique)
-    except (OSError, ValueError) as exc:
-        raise ConfigError(f"Cannot read {path}: {exc}") from exc
-    raw = _object(raw, "config", {"brightness", "main_knob", "volume_steps", "buttons", "screensaver"})
-    brightness = _integer(raw.get("brightness", 70), "brightness", 0, 100)
-    knob = _integer(raw.get("main_knob", 0), "main_knob", 0, 2)
-    steps = _integer(raw.get("volume_steps", 1), "volume_steps", 1, 10)
-    entries = raw.get("buttons", {})
+def _buttons(entries, base, *, display_only=False):
     if not isinstance(entries, dict):
         raise ConfigError("buttons must be an object keyed by button number (0-8)")
     buttons = {}
-    base = path.resolve().parent
     for key, value in entries.items():
         if key not in {str(i) for i in range(9)}:
             raise ConfigError(f"Invalid button number: {key}; expected 0-8")
@@ -134,20 +145,85 @@ def load_config(path: Path) -> Config:
                 raise ConfigError("app.timeout must be a number greater than 0 and at most 120")
             app = App(tuple(args), process, title, cwd, timeout)
         buttons[int(key)] = Button(label, icon, app)
+    if display_only and any(key > 5 for key in buttons):
+        raise ConfigError("Page buttons must be display keys 0-5; keys 6-8 select pages")
+    return buttons
+
+
+def load_config(path: Path) -> Config:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=_unique)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"Cannot read {path}: {exc}") from exc
+    raw = _object(raw, "config", {"brightness", "main_knob", "volume_steps", "buttons", "screensaver",
+                                  "brightness_knob", "brightness_step", "pages"})
+    brightness = _integer(raw.get("brightness", 70), "brightness", 0, 100)
+    knob = _integer(raw.get("main_knob", 0), "main_knob", 0, 2)
+    steps = _integer(raw.get("volume_steps", 1), "volume_steps", 1, 10)
+    brightness_knob = raw.get("brightness_knob")
+    if brightness_knob is not None:
+        brightness_knob = _integer(brightness_knob, "brightness_knob", 0, 2)
+        if brightness_knob == knob:
+            raise ConfigError("brightness_knob and main_knob must be different")
+    brightness_step = _integer(raw.get("brightness_step", 5), "brightness_step", 1, 100)
+    base = path.resolve().parent
+    pages = {}
+    if "pages" in raw:
+        if "buttons" in raw:
+            raise ConfigError("Use either pages or buttons, not both")
+        page_specs = raw["pages"]
+        if not isinstance(page_specs, dict) or not page_specs:
+            raise ConfigError("pages must be a non-empty object keyed by 6, 7, or 8")
+        for key, value in page_specs.items():
+            if key not in {"6", "7", "8"}:
+                raise ConfigError("Page selector must be 6, 7, or 8")
+            spec = _object(value, f"page {key}", {"name", "buttons"})
+            pages[int(key)] = Page(_text(spec.get("name", f"Page {int(key)-5}"), "page name"),
+                                   _buttons(spec.get("buttons", {}), base, display_only=True))
+        buttons = pages[min(pages)].buttons
+    else:
+        buttons = _buttons(raw.get("buttons", {}), base)
     screensaver = None
     if "screensaver" in raw:
         spec = _object(raw["screensaver"], "screensaver",
-                       {"enabled", "images", "idle_seconds", "frame_seconds"})
+                       {"enabled", "images", "idle_seconds", "frame_seconds", "mode", "local_timezone", "weather"})
         enabled = spec.get("enabled", True)
         if type(enabled) is not bool:
             raise ConfigError("screensaver.enabled must be true or false")
+        mode = spec.get("mode", "faces")
+        if mode not in ("faces", "cards"):
+            raise ConfigError("screensaver.mode must be faces or cards")
+        local_zone = _text(spec.get("local_timezone", "local"), "local_timezone")
+        if local_zone != "local":
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+            try:
+                ZoneInfo(local_zone)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ConfigError(f"Unknown local_timezone: {local_zone}") from exc
+        weather_spec = _object(spec.get("weather", {}), "weather",
+                               {"city", "country", "region", "latitude", "longitude"})
+        if ("latitude" in weather_spec) != ("longitude" in weather_spec):
+            raise ConfigError("Set both weather.latitude and weather.longitude")
+        for coordinate, limit in (("latitude", 90), ("longitude", 180)):
+            if coordinate in weather_spec:
+                value = weather_spec[coordinate]
+                if type(value) not in (float, int) or not math.isfinite(value) or not -limit <= value <= limit:
+                    raise ConfigError(f"weather.{coordinate} must be between {-limit} and {limit}")
+        weather_values = dict(weather_spec)
+        for name in ("city", "country", "region"):
+            if name in weather_spec:
+                _text(weather_spec[name], f"weather.{name}", empty=name == "region")
+        if "city" in weather_spec or "country" in weather_spec:
+            weather_values.setdefault("region", "")
+        weather = WeatherConfig(**weather_values)
         intervals = {}
         for name, default, minimum in (("idle_seconds", 10, 1), ("frame_seconds", 60, 0.5)):
             value = spec.get(name, default)
             if type(value) not in (int, float) or not math.isfinite(value) or not minimum <= value <= 3600:
                 raise ConfigError(f"screensaver.{name} must be a number from {minimum} to 3600")
             intervals[name] = value
-        if enabled:
+        images = ()
+        if enabled and mode == "faces":
             directory = _path(_text(spec.get("images"), "screensaver.images"), base)
             if not directory.is_dir():
                 raise ConfigError(f"Screensaver image directory does not exist: {directory}")
@@ -162,5 +238,7 @@ def load_config(path: Path) -> Config:
                         image.verify()
                 except (OSError, ValueError) as exc:
                     raise ConfigError(f"Invalid screensaver image {image_path}: {exc}") from exc
-            screensaver = ScreensaverConfig(images, **intervals)
-    return Config(brightness, knob, steps, buttons, screensaver)
+        if enabled:
+            screensaver = ScreensaverConfig(images, **intervals, mode=mode,
+                                            local_timezone=local_zone, weather=weather)
+    return Config(brightness, knob, steps, buttons, screensaver, brightness_knob, brightness_step, pages)

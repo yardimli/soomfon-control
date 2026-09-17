@@ -149,6 +149,25 @@ def test_random_delay_range(tmp_path):
     assert len(set(delays)) > 1
 
 
+def test_page_icons_replace_screensaver_and_are_restored_on_next_wake(tmp_path):
+    saver, deck, now, _ = make_saver(tmp_path)
+    now[0] = 10
+    saver.tick()
+    new_icons = [Image.new("RGB", (60, 60), "blue") for _ in range(6)]
+    saver.set_icons(new_icons)
+    deck.reset_mock()
+    saver.tick()
+    assert not saver.active
+    assert [call.args[1] for call in deck.set_key_image.call_args_list] == new_icons
+    now[0] = 20
+    saver.tick()
+    assert saver.active
+    saver.activity()
+    deck.reset_mock()
+    saver.tick()
+    assert [call.args[1] for call in deck.set_key_image.call_args_list] == new_icons
+
+
 def test_overdue_faces_are_spaced_out_and_fades_do_not_extend_cooldown(tmp_path):
     saver, deck, now, _ = make_saver(tmp_path)
     saver._delay = lambda: 60

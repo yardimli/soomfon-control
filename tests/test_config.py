@@ -57,6 +57,15 @@ def test_disabled_screensaver_needs_no_assets(tmp_path):
     assert config.screensaver is None
 
 
+@pytest.mark.parametrize("data", [
+    {"main_knob": 0, "brightness_knob": 0}, {"brightness_knob": 3},
+    {"brightness_step": 0}, {"brightness_step": True},
+])
+def test_invalid_brightness_controls(tmp_path, data):
+    with pytest.raises(ConfigError):
+        load_config(write(tmp_path, data))
+
+
 def test_screensaver_loads_images_relative_to_json(tmp_path):
     from PIL import Image
     faces = tmp_path / "faces"
@@ -69,3 +78,24 @@ def test_screensaver_loads_images_relative_to_json(tmp_path):
     (faces / "0.png").write_bytes(b"invalid image")
     with pytest.raises(ConfigError, match="Invalid screensaver image"):
         load_config(tmp_path / "config.json")
+
+
+def test_cards_mode_does_not_require_face_assets(tmp_path):
+    config = load_config(write(tmp_path, {"screensaver": {"mode": "cards"}}))
+    assert config.screensaver.images == ()
+    assert config.screensaver.weather.city == "Xindian"
+    assert config.screensaver.weather.region == "New Taipei City"
+    config = load_config(write(tmp_path, {"screensaver": {"mode": "cards", "weather": {"city": "Oslo", "country": "NO"}}}))
+    assert config.screensaver.weather.region == ""
+
+
+@pytest.mark.parametrize("spec", [
+    {"mode": "bad"}, {"mode": "cards", "local_timezone": "Not/AZone"},
+    {"mode": "cards", "weather": {"latitude": 10}},
+    {"mode": "cards", "weather": {"latitude": 91, "longitude": 0}},
+    {"mode": "cards", "weather": {"latitude": False, "longitude": 0}},
+    {"mode": "cards", "weather": {"latitude": 0, "longitude": float("nan")}},
+])
+def test_invalid_cards_settings(tmp_path, spec):
+    with pytest.raises(ConfigError):
+        load_config(write(tmp_path, {"screensaver": spec}))

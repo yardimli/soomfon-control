@@ -38,13 +38,25 @@ class Controller:
         self._screensaver = None
         self._deck = None
         self._closed = False
+        self._brightness = config.brightness
+        self._page = min(config.pages) if config.pages else None
+        self._buttons = config.pages[self._page].buttons if config.pages else config.buttons
+        self._page_icons = {}
+        self._page_keys = sorted(config.pages) if config.pages else [None]
+        self._ordered_buttons = [
+            (config.pages[page].buttons if page is not None else config.buttons).get(key)
+            for page in self._page_keys for key in range(6)
+        ]
+        self._runtime_pages = {}
+        self._icon_cache = {}
 
     def configure(self, deck):
         self._deck = deck
         deck.set_brightness(self.config.brightness)
+        self._rebuild_pages()
         icons = []
         for key in range(6):
-            button = self.config.buttons.get(key)
+            button = self._buttons.get(key)
             if button:
                 image = button_image(button)
                 deck.set_key_image(key, image)
@@ -59,6 +71,49 @@ class Controller:
             self._screensaver = Screensaver(deck, self.config.screensaver, icons)
             self._screensaver.start()
 
+    def _rebuild_pages(self):
+        for offset, page in enumerate(self._page_keys):
+            slots = self._ordered_buttons[offset * 6:(offset + 1) * 6]
+            self._runtime_pages[page] = {i: button for i, button in enumerate(slots) if button is not None}
+            if page is None:
+                self._runtime_pages[page].update({key: button for key, button in self.config.buttons.items() if key >= 6})
+            images = []
+            for button in slots:
+                if button is None:
+                    images.append(Image.new("RGB", (60, 60), "black"))
+                else:
+                    if id(button) not in self._icon_cache:
+                        self._icon_cache[id(button)] = button_image(button)
+                    images.append(self._icon_cache[id(button)])
+            self._page_icons[page] = images
+
+    def _switch_page(self, key):
+        icons = self._page_icons[key]
+        if self._screensaver:
+            self._screensaver.set_icons(icons)
+        elif self._deck is not None:
+            for index, image in enumerate(icons):
+                self._deck.set_key_image(index, image)
+        self._page = key
+        self._buttons = self._runtime_pages[key]
+        log.info("App page %s selected", self._page_keys.index(key) + 1)
+
+    def _promote(self, key):
+        if not 0 <= key < 6:
+            return
+        index = self._page_keys.index(self._page) * 6 + key
+        button = self._ordered_buttons.pop(index)
+        self._ordered_buttons.insert(0, button)
+        self._rebuild_pages()
+        self._switch_page(self._page_keys[0])
+        log.info("Most recent app: %s", button.label)
+
+    def _wake_display(self):
+        try:
+            self.actions.wake_display()
+        except Exception:
+            log.exception("Windows display wake failed")
+
     def on_key(self, key, pressed):
         if self._closed:
             return
@@ -67,6 +122,14 @@ class Controller:
             log.info("Input: knob %s %s (key %s)", key - 9, state, key)
         else:
             log.info("Input: button %s %s", key, state)
+        if pressed:
+            self._wake_display()
+        if pressed and key in self.config.pages:
+            try:
+                self._switch_page(key)
+            except Exception:
+                log.exception("Could not select page with button %s", key)
+            return
         if self._screensaver and self._screensaver.activity(wake=pressed):
             return
         if not pressed:
@@ -75,9 +138,21 @@ class Controller:
             if key == 9 + self.config.main_knob:
                 self.actions.play_pause()
                 return
-            button = self.config.buttons.get(key)
+            small_knobs = [encoder for encoder in range(3) if encoder != self.config.main_knob]
+            if key == 9 + small_knobs[0]:
+                self.actions.previous_track()
+                return
+            if key == 9 + small_knobs[1]:
+                self.actions.next_track()
+                return
+            button = self._buttons.get(key)
             if not button or not button.app:
                 return
+            # Capture the action before changing the layout beneath this physical key.
+            try:
+                self._promote(key)
+            except Exception:
+                log.exception("Could not refresh recent-app order")
             # Coalesce repeated presses while an app is still starting.
             with self._lock:
                 if button.app in self._pending:
@@ -100,8 +175,19 @@ class Controller:
         if self._closed:
             return
         log.info("Input: knob %s turn delta=%+d", encoder, delta)
+        if delta:
+            self._wake_display()
         if self._screensaver:
             self._screensaver.activity()
+        if encoder == self.config.brightness_knob and self._deck is not None:
+            try:
+                brightness = max(0, min(100, self._brightness + delta * self.config.brightness_step))
+                if brightness != self._brightness:
+                    self._deck.set_brightness(brightness)
+                    self._brightness = brightness
+                    log.info("Device brightness: %s%%", brightness)
+            except Exception:
+                log.exception("Device brightness adjustment failed")
         if encoder == self.config.main_knob:
             try:
                 self.actions.volume(delta * self.config.volume_steps)

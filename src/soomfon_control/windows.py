@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 _show_window_async = ctypes.WinDLL("user32", use_last_error=True).ShowWindowAsync
 _show_window_async.argtypes = [wintypes.HWND, ctypes.c_int]
 _show_window_async.restype = wintypes.BOOL
+_set_execution_state = ctypes.WinDLL("kernel32", use_last_error=True).SetThreadExecutionState
+_set_execution_state.argtypes = [wintypes.DWORD]
+_set_execution_state.restype = wintypes.DWORD
 
 
 @dataclass(frozen=True)
@@ -91,12 +94,31 @@ def focus(window: Window):
 
 
 class WindowsActions:
+    def wake_display(self):
+        # A one-shot idle reset: never hold the display awake between device inputs.
+        if not _set_execution_state(0x00000001 | 0x00000002):  # SYSTEM_REQUIRED | DISPLAY_REQUIRED
+            log.warning("Windows display wake request failed: %s", ctypes.get_last_error())
+        # Register input without typing, clicking, or moving the pointer.
+        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, 0, 0, 0, 0)
+        # The power API alone does not stop a screensaver. Ask the standard
+        # screensaver window to close asynchronously; never terminate its process.
+        saver = win32gui.FindWindow("WindowsScreenSaverClass", None)
+        if saver:
+            win32gui.PostMessage(saver, win32con.WM_CLOSE, 0, 0)
+            log.info("Requested Windows screensaver dismissal")
+
     def volume(self, delta: int):
         for _ in range(abs(delta)):
             tap(win32con.VK_VOLUME_UP if delta > 0 else win32con.VK_VOLUME_DOWN)
 
     def play_pause(self):
         tap(win32con.VK_MEDIA_PLAY_PAUSE)
+
+    def previous_track(self):
+        tap(win32con.VK_MEDIA_PREV_TRACK)
+
+    def next_track(self):
+        tap(win32con.VK_MEDIA_NEXT_TRACK)
 
     def activate(self, app: App):
         window = find_window(app)
@@ -105,7 +127,19 @@ class WindowsActions:
             return
         log.info("Launching %s", app.command[0])
         # An argument list and shell=False preserve paths with spaces and avoid shell parsing.
-        child = subprocess.Popen(app.command, cwd=app.cwd, shell=False)
+        try:
+            child = subprocess.Popen(app.command, cwd=app.cwd, shell=False)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 740:
+                raise
+            # Some tools (e.g. Fan Control) declare requireAdministrator.
+            # Let Windows show its normal UAC consent prompt on a button-triggered launch.
+            result = win32api.ShellExecute(None, "runas", app.command[0],
+                                          subprocess.list2cmdline(app.command[1:]),
+                                          app.cwd, win32con.SW_SHOWNORMAL)
+            if result <= 32:
+                raise OSError(f"Windows could not launch {app.command[0]} (code {result})")
+            child = None
         deadline = time.monotonic() + app.timeout
         while time.monotonic() < deadline:
             window = find_window(app)
@@ -113,7 +147,8 @@ class WindowsActions:
                 focus(window)
                 return
             # Reap short-lived launchers, but keep waiting for the real app's window.
-            child.poll()
+            if child is not None:
+                child.poll()
             time.sleep(0.15)
         raise TimeoutError(f"No window for {app.process!r} (title contains {app.title!r}) "
                            f"after {app.timeout}s. Check the process/title using --list-windows.")
