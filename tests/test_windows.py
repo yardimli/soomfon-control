@@ -16,6 +16,7 @@ def test_wake_display_resets_idle_and_closes_only_screensaver(monkeypatch, saver
     monkeypatch.setattr(backend.win32api, "mouse_event", mouse)
     monkeypatch.setattr(backend.win32gui, "FindWindow", find)
     monkeypatch.setattr(backend.win32gui, "PostMessage", post)
+    monkeypatch.setattr(backend.win32gui, "SystemParametersInfo", Mock(return_value=False))
     backend.WindowsActions().wake_display()
     power.assert_called_once_with(3)  # No ES_CONTINUOUS: future idle sleep remains enabled.
     mouse.assert_called_once_with(backend.win32con.MOUSEEVENTF_MOVE, 0, 0, 0, 0)
@@ -24,6 +25,65 @@ def test_wake_display_resets_idle_and_closes_only_screensaver(monkeypatch, saver
         post.assert_called_once_with(saver, backend.win32con.WM_CLOSE, 0, 0)
     else:
         post.assert_not_called()
+
+
+@pytest.mark.parametrize("cursor_x, expected_delta", [(0, -12), (1919, -12), (-1920, 12)])
+def test_active_custom_screensaver_gets_real_motion(monkeypatch, cursor_x, expected_delta):
+    from soomfon_control import windows as backend
+    monkeypatch.setattr(backend, "_set_execution_state", Mock(return_value=1))
+    dismiss = Mock()
+    monkeypatch.setattr(backend, "dismiss_screensaver", dismiss)
+    query = Mock(return_value=True)
+    monkeypatch.setattr(backend.win32gui, "SystemParametersInfo", query)
+    monkeypatch.setattr(backend.win32gui, "FindWindow", Mock(return_value=0))
+    monkeypatch.setattr(backend.win32api, "GetCursorPos", lambda: (cursor_x, 500))
+    monkeypatch.setattr(backend.win32api, "GetSystemMetrics",
+                        lambda metric: -1920 if metric == backend.win32con.SM_XVIRTUALSCREEN else 3840)
+    mouse = Mock()
+    monkeypatch.setattr(backend.win32api, "mouse_event", mouse)
+    backend.WindowsActions().wake_display()
+    query.assert_called_once_with(backend.win32con.SPI_GETSCREENSAVERRUNNING)
+    dismiss.assert_called_once_with()
+    mouse.assert_called_once_with(backend.win32con.MOUSEEVENTF_MOVE, expected_delta, 0, 0, 0)
+
+
+def test_direct_dismissal_finds_saver_on_separate_desktop_only(monkeypatch):
+    from soomfon_control import windows as backend
+    desktop = Mock()
+    desktop.EnumDesktopWindows.return_value = [2, 3]
+    opened = Mock(return_value=desktop)
+    monkeypatch.setattr(backend.win32service, "OpenDesktop", opened)
+    monkeypatch.setattr(backend.win32gui, "EnumWindows", lambda cb, arg: cb(1, arg))
+    monkeypatch.setattr(backend.win32gui, "GetClassName", lambda hwnd: "CustomClass")
+    monkeypatch.setattr(backend.win32process, "GetWindowThreadProcessId", lambda hwnd: (1, hwnd))
+    names = {1: "wallpaper64.exe", 2: "wpxscreensaver64.scr", 3: "notepad.exe"}
+    monkeypatch.setattr(backend.psutil, "Process", lambda pid: Mock(**{"name.return_value": names[pid]}))
+    post = Mock()
+    monkeypatch.setattr(backend.win32gui, "PostMessage", post)
+    backend.dismiss_screensaver()
+    post.assert_called_once_with(2, backend.win32con.WM_CLOSE, 0, 0)
+    opened.assert_called_once_with("Screen-saver", 0, False, 129)
+    desktop.CloseDesktop.assert_called_once_with()
+
+
+def test_direct_dismissal_reports_access_denied(monkeypatch, caplog):
+    from soomfon_control import windows as backend
+    monkeypatch.setattr(backend.win32gui, "EnumWindows", Mock())
+    monkeypatch.setattr(backend.win32service, "OpenDesktop",
+                        Mock(side_effect=backend.win32service.error(5, "OpenDesktop", "Access denied")))
+    backend.dismiss_screensaver()
+    assert "denied access" in caplog.text
+
+
+def test_direct_dismissal_closes_desktop_handle_on_enumeration_failure(monkeypatch):
+    from soomfon_control import windows as backend
+    desktop = Mock()
+    desktop.EnumDesktopWindows.side_effect = OSError("desktop disappeared")
+    monkeypatch.setattr(backend.win32gui, "EnumWindows", Mock())
+    monkeypatch.setattr(backend.win32service, "OpenDesktop", Mock(return_value=desktop))
+    with pytest.raises(OSError):
+        backend.dismiss_screensaver()
+    desktop.CloseDesktop.assert_called_once_with()
 
 
 def test_track_actions_send_media_keys(monkeypatch):

@@ -13,6 +13,7 @@ import win32api
 import win32con
 import win32gui
 import win32process
+import win32service
 
 from .config import App
 
@@ -93,13 +94,69 @@ def focus(window: Window):
     raise RuntimeError(f"Windows refused to focus {window.process}: {window.title}")
 
 
+def dismiss_screensaver():
+    """Close identified saver windows on both desktops without requiring focus."""
+    requested = set()
+
+    def visit(handle, _=None):
+        if handle in requested:
+            return True
+        try:
+            standard = win32gui.GetClassName(handle) == "WindowsScreenSaverClass"
+            _, pid = win32process.GetWindowThreadProcessId(handle)
+            name = psutil.Process(pid).name().casefold()
+            # Wallpaper Engine's saver is wpxscreensaver64.scr. Its normal
+            # wallpaper32/64.exe processes must never receive WM_CLOSE here.
+            if standard or name.endswith(".scr"):
+                try:
+                    win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
+                except win32gui.error as exc:
+                    log.warning("Windows refused screensaver close for %s: %s", name, exc)
+                    return True
+                requested.add(handle)
+                log.info("Screensaver close requested: %s (window %s)", name, handle)
+        except (psutil.Error, OSError, win32gui.error) as exc:
+            log.debug("Could not inspect/close screensaver window %s: %s", handle, exc)
+        return True
+
+    win32gui.EnumWindows(visit, None)
+    try:
+        desktop = win32service.OpenDesktop("Screen-saver", 0, False,
+                                          win32con.DESKTOP_READOBJECTS | win32con.DESKTOP_WRITEOBJECTS)
+    except win32service.error as exc:
+        if exc.winerror == 5:
+            log.warning("Windows denied access to the screensaver desktop; sign-in may be required")
+        else:
+            log.debug("No accessible Screen-saver desktop: %s", exc)
+    else:
+        try:
+            for handle in desktop.EnumDesktopWindows():
+                visit(handle)
+        finally:
+            desktop.CloseDesktop()
+    if not requested:
+        log.warning("Screensaver reported active, but no accessible saver window was found")
+
+
 class WindowsActions:
     def wake_display(self):
         # A one-shot idle reset: never hold the display awake between device inputs.
         if not _set_execution_state(0x00000001 | 0x00000002):  # SYSTEM_REQUIRED | DISPLAY_REQUIRED
             log.warning("Windows display wake request failed: %s", ctypes.get_last_error())
-        # Register input without typing, clicking, or moving the pointer.
-        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, 0, 0, 0, 0)
+        # Wallpaper Engine and other custom savers can ignore zero-distance motion.
+        # Only nudge while a Windows screensaver is active, never during normal use.
+        delta = 0
+        if win32gui.SystemParametersInfo(win32con.SPI_GETSCREENSAVERRUNNING):
+            try:
+                dismiss_screensaver()
+            except Exception:
+                log.exception("Direct screensaver dismissal failed; trying mouse wake")
+            x, _ = win32api.GetCursorPos()
+            midpoint = (win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
+                        + win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN) // 2)
+            delta = 12 if x < midpoint else -12
+            log.info("Windows screensaver active; sending mouse motion to dismiss it")
+        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, delta, 0, 0, 0)
         # The power API alone does not stop a screensaver. Ask the standard
         # screensaver window to close asynchronously; never terminate its process.
         saver = win32gui.FindWindow("WindowsScreenSaverClass", None)
